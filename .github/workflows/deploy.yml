@@ -1,0 +1,165 @@
+# Déploiement automatique de wazzzpass sur le VPS IONOS (site statique).
+#
+# Trois façons de mettre en ligne :
+#  1. Pousser un tag vX.Y.Z (git tag v1.0.1 && git push origin v1.0.1)
+#  2. Onglet Actions -> « Déploiement production » -> Run workflow -> action « release » :
+#     crée le tag de version suivant sur main (ou celui indiqué) puis le déploie.
+#  3. Même écran : « deploy » d'un tag existant, « rollback » ou « status ».
+#
+# Le serveur n'accepte de cette clé SSH que la commande « wazzzpass-deployer » (voir
+# deploy/activer-deploiement-auto.sh). Secrets requis : VPS_HOST, VPS_PORT, VPS_SSH_KEY, VPS_KNOWN_HOSTS.
+name: Déploiement production
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "release = nouveau tag sur main + mise en ligne · deploy = tag existant · rollback · status"
+        type: choice
+        options: [release, deploy, rollback, status]
+        default: release
+      version:
+        description: "release : vX.Y.Z, ou « auto » pour la version suivante (v1.2.3 -> v1.2.4)"
+        required: false
+        default: auto
+      ref:
+        description: "deploy : tag existant (vX.Y.Z) ou main"
+        required: false
+        default: main
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preparer:
+    name: Préparer
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.p.outputs.action }}
+      ref: ${{ steps.p.outputs.ref }}
+      source: ${{ steps.p.outputs.source }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+      - id: p
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ github.ref_name }}
+          IN_ACTION: ${{ inputs.action }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          SEMVER='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          if [ "$EVENT" = push ]; then
+            ACTION=deploy; REF="$TAG"; SOURCE="$TAG"
+          else
+            ACTION="$IN_ACTION"
+            case "$ACTION" in
+              release)
+                if [ -z "$IN_VERSION" ] || [ "$IN_VERSION" = auto ]; then
+                  LAST="$(git tag -l 'v*.*.*' --sort=-v:refname | grep -E "$SEMVER" | head -1 || true)"
+                  if [ -z "$LAST" ]; then REF=v1.0.0; else
+                    IFS=. read -r MA MI PA <<<"${LAST#v}"; REF="v$MA.$MI.$((PA + 1))"; fi
+                else REF="$IN_VERSION"; fi
+                [[ "$REF" =~ $SEMVER ]] || { echo "::error::version invalide : $REF"; exit 1; }
+                if git rev-parse -q --verify "refs/tags/$REF" >/dev/null; then echo "::error::le tag $REF existe déjà"; exit 1; fi
+                SOURCE=main ;;
+              deploy)   REF="$IN_REF"; SOURCE="$IN_REF" ;;
+              rollback|status) REF=""; SOURCE="" ;;
+              *) echo "::error::action inconnue"; exit 1 ;;
+            esac
+          fi
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"; echo "ref=$REF" >> "$GITHUB_OUTPUT"; echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "### $ACTION ${REF}" >> "$GITHUB_STEP_SUMMARY"
+
+  verifier:
+    name: Vérifier (types + build)
+    needs: preparer
+    if: needs.preparer.outputs.action == 'deploy' || needs.preparer.outputs.action == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preparer.outputs.source }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run check
+      - run: npm run build
+      - name: Clé Dropbox présente dans le build
+        run: |
+          if grep -q "xxxxxxxx" dist/assets/*.js || ! grep -q "VITE_DROPBOX_APP_KEY=" .env.production 2>/dev/null; then
+            echo "::warning::.env.production absent ou clé Dropbox non renseignée : l'app affichera « Configuration requise »"
+          fi
+
+  tag:
+    name: Créer le tag
+    needs: [preparer, verifier]
+    if: needs.preparer.outputs.action == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - env:
+          REF: ${{ needs.preparer.outputs.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$REF" -m "Version $REF"
+          git push origin "$REF"   # poussé avec GITHUB_TOKEN : ne relance pas ce workflow
+
+  serveur:
+    name: ${{ needs.preparer.outputs.action }} ${{ needs.preparer.outputs.ref }} sur le VPS
+    needs: [preparer, verifier, tag]
+    if: >-
+      always() && needs.preparer.result == 'success' &&
+      (needs.verifier.result == 'success' || needs.verifier.result == 'skipped') &&
+      (needs.tag.result == 'success' || needs.tag.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://wazzzpass.walautao.fr
+    steps:
+      - name: Préparer la clé SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+      - name: Exécuter sur le serveur
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          ACTION: ${{ needs.preparer.outputs.action }}
+          REF: ${{ needs.preparer.outputs.ref }}
+        run: |
+          case "$ACTION" in deploy|release) CMD="deploy $REF" ;; rollback|status) CMD="$ACTION" ;; *) exit 2 ;; esac
+          ssh -i ~/.ssh/deploy_key -p "${VPS_PORT:-22}" \
+              -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=30 \
+              "wazzzpass@$VPS_HOST" "$CMD"
+      - name: Vérifier le site public
+        if: needs.preparer.outputs.action != 'status'
+        continue-on-error: true
+        run: curl -fsS -o /dev/null -w "https://wazzzpass.walautao.fr -> HTTP %{http_code}\n" --retry 5 --retry-delay 3 https://wazzzpass.walautao.fr
+      - name: Nettoyer
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
