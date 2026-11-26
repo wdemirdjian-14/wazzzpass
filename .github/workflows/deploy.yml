@@ -101,8 +101,8 @@ jobs:
       - run: npm run build
       - name: Clé Dropbox présente dans le build
         run: |
-          if grep -q "xxxxxxxx" dist/assets/*.js || ! grep -q "VITE_DROPBOX_APP_KEY=" .env.production 2>/dev/null; then
-            echo "::warning::.env.production absent ou clé Dropbox non renseignée : l'app affichera « Configuration requise »"
+          if grep -q "xxxxxxxx" dist/assets/*.js || ! grep -q "VITE_DROPBOX_APP_KEY=." .env 2>/dev/null; then
+            echo "::warning::.env absent ou clé Dropbox non renseignée : l'app affichera « Configuration requise »"
           fi
 
   tag:

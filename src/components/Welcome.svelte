@@ -45,7 +45,7 @@
       <h2>Configuration requise</h2>
       <p class="muted">
         La clé d’application Dropbox n’est pas définie. Créez une app sur dropbox.com/developers (accès « App folder »)
-        puis renseignez <code>VITE_DROPBOX_APP_KEY</code> dans <code>.env.production</code>.
+        puis renseignez <code>VITE_DROPBOX_APP_KEY</code> dans <code>.env</code>.
       </p>
       <p class="muted small">URL de redirection à déclarer : <code>{redirectUri()}</code></p>
     {:else}

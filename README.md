@@ -30,7 +30,7 @@ fichier clé si vous cochez « Mémoriser ». Le mot de passe maître et le cont
 2. Onglet **Permissions** : cocher `files.content.read` et `files.content.write` → *Submit*.
 3. Onglet **Settings** → *OAuth 2 / Redirect URIs* : ajouter
    `https://wazzzpass.walautao.fr/` et `http://localhost:5173/` (développement).
-4. Copier l'**App key** (publique, ce n'est pas un secret) dans `.env.production` :
+4. Copier l'**App key** (publique, ce n'est pas un secret) dans `.env` (déjà fait) :
    ```
    VITE_DROPBOX_APP_KEY=votre_app_key
    ```
